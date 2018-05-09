@@ -56,24 +56,32 @@ module ActiveMerchant #:nodoc:
         "CAD" => '124',
         "CHF" => '756',
         "CLP" => '152',
+        "CNY" => '156',
         "COP" => '170',
+        "CRC" => '188',
         "CZK" => '203',
+        "DKK" => '208',
+        "DOP" => '214',
         "EUR" => '978',
         "GBP" => '826',
         "GTQ" => '320',
         "HUF" => '348',
+        "IDR" => '360',
+        "INR" => '356',
         "JPY" => '392',
+        "KRW" => '410',
         "MYR" => '458',
         "MXN" => '484',
         "NOK" => '578',
         "NZD" => '554',
         "PEN" => '604',
-        "PLN" => '616',
+        "PLN" => '985',
         "RUB" => '643',
         "SAR" => '682',
         "SEK" => '752',
         "SGD" => '702',
         "THB" => '764',
+        "TWD" => '901',
         "USD" => '840',
         "UYU" => '858'
       }
@@ -488,7 +496,7 @@ module ActiveMerchant #:nodoc:
 
       def encrypt(key, order_id)
         block_length = 8
-        cipher = OpenSSL::Cipher::Cipher.new('DES3')
+        cipher = OpenSSL::Cipher.new('DES3')
         cipher.encrypt
 
         cipher.key = Base64.strict_decode64(key)

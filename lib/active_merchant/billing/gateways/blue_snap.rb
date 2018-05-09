@@ -5,7 +5,7 @@ module ActiveMerchant
     class BlueSnapGateway < Gateway
       self.test_url = "https://sandbox.bluesnap.com/services/2"
       self.live_url = "https://ws.bluesnap.com/services/2"
-      self.supported_countries = %w(US GB)
+      self.supported_countries = %w(US CA GB AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE)
 
       self.default_currency = 'USD'
       self.supported_cardtypes = [:visa, :master, :american_express, :discover, :jcb, :diners_club, :maestro]
@@ -86,7 +86,7 @@ module ActiveMerchant
       def refund(money, authorization, options={})
         commit(:refund, :put) do |doc|
           add_authorization(doc, authorization)
-          add_amount(doc, money)
+          add_amount(doc, money, options)
           add_order(doc, options)
         end
       end
@@ -140,7 +140,7 @@ module ActiveMerchant
       def add_auth_purchase(doc, money, payment_method, options)
         doc.send("recurring-transaction", options[:recurring] ? "RECURRING" : "ECOMMERCE")
         add_order(doc, options)
-        add_amount(doc, money)
+        add_amount(doc, money, options)
         doc.send("transaction-fraud-info") do
           doc.send("shopper-ip-address", options[:ip]) if options[:ip]
         end
@@ -155,7 +155,7 @@ module ActiveMerchant
         end
       end
 
-      def add_amount(doc, money)
+      def add_amount(doc, money, options)
         doc.amount(amount(money))
         doc.currency(options[:currency] || currency(money))
       end
@@ -201,11 +201,6 @@ module ActiveMerchant
         doc.address(address[:address]) if address[:address]
         doc.city(address[:city]) if address[:city]
         doc.zip(address[:zip]) if address[:zip]
-      end
-
-      def add_invoice(post, money, options)
-        post[:amount] = amount(money)
-        post[:currency] = (options[:currency] || currency(money))
       end
 
       def add_authorization(doc, authorization)

@@ -14,23 +14,95 @@ module ActiveMerchant #:nodoc:
 
       CURRENCY_CODES = {
         "AED" => "784",
+        "ALL" => "008",
+        "AMD" => "051",
+        "ANG" => "532",
+        "ARS" => "032",
         "AUD" => "036",
+        "AWG" => "533",
+        "BAM" => "977",
+        "BBD" => "052",
+        "BGN" => "975",
+        "BMD" => "060",
+        "BOB" => "068",
         "BRL" => "986",
+        "BSD" => "044",
+        "BWP" => "072",
+        "BZD" => "084",
         "CAD" => "124",
         "CHF" => "756",
+        "CLP" => "152",
+        "CNY" => "156",
+        "COP" => "170",
+        "CRC" => "188",
         "CZK" => "203",
         "DKK" => "208",
+        "DOP" => "214",
+        "EGP" => "818",
         "EUR" => "978",
         "GBP" => "826",
+        "GEL" => "981",
+        "GIP" => "292",
+        "GTQ" => "320",
+        "GYD" => "328",
         "HKD" => "344",
-        "ICK" => "352",
+        "HNL" => "340",
+        "HRK" => "191",
+        "HUF" => "348",
+        "ISK" => "352",
+        "IDR" => "360",
+        "ILS" => "376",
+        "INR" => "356",
         "JPY" => "392",
+        "JMD" => "388",
+        "KES" => "404",
+        "KRW" => "410",
+        "KYD" => "136",
+        "LBP" => "422",
+        "LKR" => "144",
+        "MAD" => "504",
+        "MVR" => "462",
+        "MWK" => "454",
         "MXN" => "484",
+        "MYR" => "458",
+        "NAD" => "516",
+        "NGN" => "566",
+        "NIO" => "558",
         "NOK" => "578",
+        "NPR" => "524",
         "NZD" => "554",
+        "PAB" => "590",
+        "PEN" => "604",
+        "PGK" => "598",
+        "PHP" => "608",
+        "PKR" => "586",
+        "PLN" => "985",
+        "PYG" => "600",
+        "QAR" => "634",
+        "RON" => "946",
+        "RSD" => "941",
+        "RUB" => "643",
+        "RWF" => "646",
+        "SAR" => "682",
         "SEK" => "752",
         "SGD" => "702",
+        "SRD" => "968",
+        "THB" => "764",
+        "TND" => "788",
+        "TRY" => "949",
+        "TTD" => "780",
+        "TWD" => "901",
+        "TZS" => "834",
+        "UAH" => "980",
+        "UGX" => "800",
         "USD" => "840",
+        "UYU" => "858",
+        "VND" => "704",
+        "WST" => "882",
+        "XAF" => "950",
+        "XCD" => "951",
+        "XOF" => "952",
+        "ZAR" => "710"
       }
 
       CVV_CODE = {
@@ -83,15 +155,18 @@ module ActiveMerchant #:nodoc:
         add_invoice(post, credit_card_or_reference, money, options)
         add_credit_card_or_reference(post, credit_card_or_reference)
         add_customer_data(post, options)
+        add_remote_address(post, options)
         commit('SALE', post)
       end
 
       def purchase(money, credit_card_or_reference, options = {})
         post = {}
+        add_pair(post, :captureDelay, 0)
         add_amount(post, money, options)
         add_invoice(post, credit_card_or_reference, money, options)
         add_credit_card_or_reference(post, credit_card_or_reference)
         add_customer_data(post, options)
+        add_remote_address(post, options)
         commit('SALE', post)
       end
 
@@ -99,6 +174,7 @@ module ActiveMerchant #:nodoc:
         post = {}
         add_pair(post, :xref, authorization)
         add_pair(post, :amount, amount(money), :required => true)
+        add_remote_address(post, options)
 
         commit('CAPTURE', post)
       end
@@ -107,12 +183,23 @@ module ActiveMerchant #:nodoc:
         post = {}
         add_pair(post, :xref, authorization)
         add_amount(post, money, options)
-        commit('REFUND', post)
+        add_remote_address(post, options)
+        response = commit('REFUND_SALE', post)
+
+        return response if response.success?
+        return response unless options[:force_full_refund_if_unsettled]
+
+        if response.params["responseCode"] == "65541"
+          void(authorization, options)
+        else
+          response
+        end
       end
 
       def void(authorization, options = {})
         post = {}
         add_pair(post, :xref, authorization)
+        add_remote_address(post, options)
         commit('CANCEL', post)
       end
 
@@ -147,12 +234,17 @@ module ActiveMerchant #:nodoc:
           add_pair(post, :customerAddress, "#{address[:address1]} #{address[:address2]}".strip)
           add_pair(post, :customerPostCode, address[:zip])
           add_pair(post, :customerPhone, options[:phone])
+          add_pair(post, :customerCountryCode, address[:country] || 'GB')
+        else
+          add_pair(post, :customerCountryCode, 'GB')
         end
       end
 
       def add_invoice(post, credit_card_or_reference, money, options)
         add_pair(post, :transactionUnique, options[:order_id], :required => true)
         add_pair(post, :orderRef, options[:description] || options[:order_id], :required => true)
+        add_pair(post, :statementNarrative1, options[:merchant_name]) if options[:merchant_name]
+        add_pair(post, :statementNarrative2, options[:dynamic_descriptor]) if options[:dynamic_descriptor]
         if credit_card_or_reference.respond_to?(:number)
           if ['american_express', 'diners_club'].include?(card_brand(credit_card_or_reference).to_s)
             add_pair(post, :item1Quantity, 1)
@@ -196,6 +288,10 @@ module ActiveMerchant #:nodoc:
 
       def add_threeds_required(post, options)
         add_pair(post, :threeDSRequired, (options[:threeds_required] || @threeds_required) ? 'Y' : 'N')
+      end
+
+      def add_remote_address(post, options={})
+        add_pair(post, :remoteAddress, options[:ip] || '1.1.1.1')
       end
 
       def normalize_line_endings(str)

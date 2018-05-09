@@ -6,8 +6,8 @@ rescue LoadError
   raise "Could not load the braintree gem.  Use `gem install braintree` to install it."
 end
 
-unless Braintree::Version::Major == 2 && Braintree::Version::Minor >= 4
-  raise "Need braintree gem >= 2.4.0. Run `gem install braintree --version '~>2.4'` to get the correct version."
+unless Braintree::Version::Major == 2 && Braintree::Version::Minor >= 78
+  raise "Need braintree gem >= 2.78.0. Run `gem install braintree --version '~>2.78'` to get the correct version."
 end
 
 module ActiveMerchant #:nodoc:
@@ -42,6 +42,10 @@ module ActiveMerchant #:nodoc:
 
       self.display_name = 'Braintree (Blue Platform)'
 
+      ERROR_CODES = {
+        cannot_refund_if_unsettled: 91506
+      }
+
       def initialize(options = {})
         requires!(options, :merchant_id, :public_key, :private_key)
         @merchant_account_id = options[:merchant_account_id]
@@ -74,7 +78,7 @@ module ActiveMerchant #:nodoc:
 
       def capture(money, authorization, options = {})
         commit do
-          result = @braintree_gateway.transaction.submit_for_settlement(authorization, amount(money).to_s)
+          result = @braintree_gateway.transaction.submit_for_settlement(authorization, localized_amount(money, options[:currency] || default_currency).to_s)
           response_from_result(result)
         end
       end
@@ -90,11 +94,15 @@ module ActiveMerchant #:nodoc:
       def refund(*args)
         # legacy signature: #refund(transaction_id, options = {})
         # new signature: #refund(money, transaction_id, options = {})
-        money, transaction_id, _ = extract_refund_args(args)
-        money = amount(money).to_s if money
+        money, transaction_id, options = extract_refund_args(args)
+        money = localized_amount(money, options[:currency] || default_currency).to_s if money
 
         commit do
-          response_from_result(@braintree_gateway.transaction.refund(transaction_id, money))
+          response = response_from_result(@braintree_gateway.transaction.refund(transaction_id, money))
+          return response if response.success?
+          return response unless options[:force_full_refund_if_unsettled]
+
+          void(transaction_id) if response.message =~ /#{ERROR_CODES[:cannot_refund_if_unsettled]}/
         end
       end
 
@@ -150,6 +158,8 @@ module ActiveMerchant #:nodoc:
             :first_name => creditcard.first_name,
             :last_name => creditcard.last_name,
             :email => scrub_email(options[:email]),
+            :phone => options[:phone] || (options[:billing_address][:phone] if options[:billing_address] &&
+				      options[:billing_address][:phone]),
             :credit_card => credit_card_params
           )
           Response.new(result.success?, message_from_result(result),
@@ -220,6 +230,8 @@ module ActiveMerchant #:nodoc:
             :first_name => creditcard.first_name,
             :last_name => creditcard.last_name,
             :email => scrub_email(options[:email]),
+            :phone => options[:phone] || (options[:billing_address][:phone] if options[:billing_address] &&
+	            options[:billing_address][:phone]),
             :id => options[:customer],
           }.merge credit_card_params
           result = @braintree_gateway.customer.create(merge_credit_card_options(parameters, options))
@@ -304,7 +316,7 @@ module ActiveMerchant #:nodoc:
           :region => address[:state],
           :postal_code => scrub_zip(address[:zip]),
         }
-        if(address[:country] || address[:country_code_alpha2])
+        if (address[:country] || address[:country_code_alpha2])
           mapped[:country_code_alpha2] = (address[:country] || address[:country_code_alpha2])
         elsif address[:country_name]
           mapped[:country_name] = address[:country_name]
@@ -443,6 +455,7 @@ module ActiveMerchant #:nodoc:
       def customer_hash(customer, include_credit_cards=false)
         hash = {
           "email" => customer.email,
+          "phone" => customer.phone,
           "first_name" => customer.first_name,
           "last_name" => customer.last_name,
           "id" => customer.id
@@ -484,7 +497,8 @@ module ActiveMerchant #:nodoc:
 
         customer_details = {
           "id" => transaction.customer_details.id,
-          "email" => transaction.customer_details.email
+          "email" => transaction.customer_details.email,
+          "phone" => transaction.customer_details.phone,
         }
 
         billing_details = {
@@ -516,6 +530,7 @@ module ActiveMerchant #:nodoc:
 
         {
           "order_id"                => transaction.order_id,
+          "amount"                  => transaction.amount.to_s,
           "status"                  => transaction.status,
           "credit_card_details"     => credit_card_details,
           "customer_details"        => customer_details,
@@ -529,18 +544,24 @@ module ActiveMerchant #:nodoc:
 
       def create_transaction_parameters(money, credit_card_or_vault_id, options)
         parameters = {
-          :amount => amount(money).to_s,
+          :amount => localized_amount(money, options[:currency] || default_currency).to_s,
           :order_id => options[:order_id],
           :customer => {
             :id => options[:store] == true ? "" : options[:store],
-            :email => scrub_email(options[:email])
+            :email => scrub_email(options[:email]),
+            :phone => options[:phone] || (options[:billing_address][:phone] if options[:billing_address] &&
+	            options[:billing_address][:phone])
           },
           :options => {
             :store_in_vault => options[:store] ? true : false,
             :submit_for_settlement => options[:submit_for_settlement],
-            :hold_in_escrow => options[:hold_in_escrow]
+            :hold_in_escrow => options[:hold_in_escrow],
           }
         }
+
+        if options[:skip_advanced_fraud_checking]
+          parameters[:options].merge!({ :skip_advanced_fraud_checking => options[:skip_advanced_fraud_checking] })
+        end
 
         parameters[:custom_fields] = options[:custom_fields]
         parameters[:device_data] = options[:device_data] if options[:device_data]
@@ -573,8 +594,20 @@ module ActiveMerchant #:nodoc:
                 :number => credit_card_or_vault_id.number,
                 :expiration_month => credit_card_or_vault_id.month.to_s.rjust(2, "0"),
                 :expiration_year => credit_card_or_vault_id.year.to_s,
-                :cardholder_name => "#{credit_card_or_vault_id.first_name} #{credit_card_or_vault_id.last_name}",
-                :cryptogram => credit_card_or_vault_id.payment_cryptogram
+                :cardholder_name => credit_card_or_vault_id.name,
+                :cryptogram => credit_card_or_vault_id.payment_cryptogram,
+                :eci_indicator => credit_card_or_vault_id.eci
+              }
+          elsif credit_card_or_vault_id.source == :android_pay
+              parameters[:android_pay_card] = {
+                :number => credit_card_or_vault_id.number,
+                :cryptogram => credit_card_or_vault_id.payment_cryptogram,
+                :expiration_month => credit_card_or_vault_id.month.to_s.rjust(2, "0"),
+                :expiration_year => credit_card_or_vault_id.year.to_s,
+                :google_transaction_id => credit_card_or_vault_id.transaction_id,
+                :source_card_type => credit_card_or_vault_id.brand,
+                :source_card_last_four => credit_card_or_vault_id.last_digits,
+                :eci_indicator => credit_card_or_vault_id.eci
               }
             end
           else
@@ -582,7 +615,8 @@ module ActiveMerchant #:nodoc:
               :number => credit_card_or_vault_id.number,
               :cvv => credit_card_or_vault_id.verification_value,
               :expiration_month => credit_card_or_vault_id.month.to_s.rjust(2, "0"),
-              :expiration_year => credit_card_or_vault_id.year.to_s
+              :expiration_year => credit_card_or_vault_id.year.to_s,
+              :cardholder_name => credit_card_or_vault_id.name
             }
           end
         end
@@ -597,6 +631,14 @@ module ActiveMerchant #:nodoc:
             name: options[:descriptor_name],
             phone: options[:descriptor_phone],
             url: options[:descriptor_url]
+          }
+        end
+
+        if options[:three_d_secure]
+          parameters[:three_d_secure_pass_thru] = {
+            cavv: options[:three_d_secure][:cavv],
+            eci_flag: options[:three_d_secure][:eci],
+            xid: options[:three_d_secure][:xid],
           }
         end
 
