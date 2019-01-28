@@ -12,6 +12,7 @@ class StripeTest < Test::Unit::TestCase
 
     @options = {
       :billing_address => address(),
+      :statement_address => statement_address(),
       :description => 'Test Purchase'
     }
 
@@ -439,6 +440,25 @@ class StripeTest < Test::Unit::TestCase
     @gateway.purchase(@amount, @credit_card, @options)
   end
 
+  def test_adds_application_to_x_stripe_client_user_agent_header
+    application = {
+      name: "app",
+      version: "1.0",
+      url: "https://example.com"
+    }
+
+    response = stub_comms(@gateway, :ssl_request) do
+      @gateway.purchase(@amount, "cus_xxx|card_xxx", @options.merge({application: application}))
+    end.check_request do |method, endpoint, data, headers|
+      assert_match(/\"application\"/, headers["X-Stripe-Client-User-Agent"])
+      assert_match(/\"name\":\"app\"/, headers["X-Stripe-Client-User-Agent"])
+      assert_match(/\"version\":\"1.0\"/, headers["X-Stripe-Client-User-Agent"])
+      assert_match(/\"url\":\"https:\/\/example.com\"/, headers["X-Stripe-Client-User-Agent"])
+    end.respond_with(successful_purchase_response)
+
+    assert_success response
+  end
+
   def test_successful_purchase_with_token_including_customer
     response = stub_comms(@gateway, :ssl_request) do
       @gateway.purchase(@amount, "cus_xxx|card_xxx")
@@ -591,18 +611,19 @@ class StripeTest < Test::Unit::TestCase
   def test_successful_refund_with_refund_fee_amount
     s = sequence("request")
     @gateway.expects(:ssl_request).returns(successful_partially_refunded_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(successful_application_fee_list_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(successful_refunded_application_fee_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(successful_fetch_application_fee_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(successful_partially_refunded_application_fee_response).in_sequence(s)
 
     assert response = @gateway.refund(@refund_amount, 'ch_test_charge', :refund_fee_amount => 100)
     assert_success response
   end
 
+  # What is the significance of this??? it's to test that the first response is used as primary. so identical to above with an extra assertion
   def test_refund_with_fee_response_gives_a_charge_authorization
     s = sequence("request")
     @gateway.expects(:ssl_request).returns(successful_partially_refunded_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(successful_application_fee_list_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(successful_refunded_application_fee_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(successful_fetch_application_fee_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(successful_partially_refunded_application_fee_response).in_sequence(s)
 
     assert response = @gateway.refund(@refund_amount, 'ch_test_charge', :refund_fee_amount => 100)
     assert_success response
@@ -612,17 +633,17 @@ class StripeTest < Test::Unit::TestCase
   def test_unsuccessful_refund_with_refund_fee_amount_when_application_fee_id_not_found
     s = sequence("request")
     @gateway.expects(:ssl_request).returns(successful_partially_refunded_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(unsuccessful_application_fee_list_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(unsuccessful_fetch_application_fee_response).in_sequence(s)
 
     assert response = @gateway.refund(@refund_amount, 'ch_test_charge', :refund_fee_amount => 100)
     assert_failure response
-    assert_match(/^Application fee id could not be found/, response.message)
+    assert_match(/^Application fee id could not be retrieved/, response.message)
   end
 
   def test_unsuccessful_refund_with_refund_fee_amount_when_refunding_application_fee
     s = sequence("request")
     @gateway.expects(:ssl_request).returns(successful_partially_refunded_response).in_sequence(s)
-    @gateway.expects(:ssl_request).returns(successful_application_fee_list_response).in_sequence(s)
+    @gateway.expects(:ssl_request).returns(successful_fetch_application_fee_response).in_sequence(s)
     @gateway.expects(:ssl_request).returns(generic_error_response).in_sequence(s)
 
     assert response = @gateway.refund(@refund_amount, 'ch_test_charge', :refund_fee_amount => 100)
@@ -692,6 +713,17 @@ class StripeTest < Test::Unit::TestCase
     assert_equal 'ch_test_charge', response.authorization
   end
 
+  def test_declined_request_advanced_pickup_card_code
+    @gateway.expects(:ssl_request).returns(declined_pickup_card_purchase_response)
+
+    assert response = @gateway.purchase(@amount, @credit_card, @options)
+    assert_failure response
+
+    assert_equal Gateway::STANDARD_ERROR_CODE[:pickup_card], response.error_code
+    refute response.test? # unsuccessful request defaults to live
+    assert_equal 'ch_test_charge', response.authorization
+  end
+
   def test_declined_request_advanced_decline_code_not_in_standard_mapping
     @gateway.expects(:ssl_request).returns(declined_generic_decline_purchase_response)
 
@@ -723,9 +755,39 @@ class StripeTest < Test::Unit::TestCase
 
   def test_add_creditcard_with_track_data
     post = {}
-    @credit_card.stubs(:track_data).returns("Tracking data")
+    @credit_card.stubs(:track_data).returns("Swipe data")
+    @credit_card.stubs(:read_method).returns('contactless_magstripe')
     @gateway.send(:add_creditcard, post, @credit_card, {})
     assert_equal @credit_card.track_data, post[:card][:swipe_data]
+    assert_equal "contactless_magstripe_mode", post[:card][:read_method]
+    assert_nil post[:card][:number]
+    assert_nil post[:card][:exp_year]
+    assert_nil post[:card][:exp_month]
+    assert_nil post[:card][:cvc]
+    assert_nil post[:card][:name]
+  end
+
+  def test_add_creditcard_with_fallback_no_chip
+    post = {}
+    @credit_card.stubs(:track_data).returns("Swipe data")
+    @credit_card.stubs(:read_method).returns('fallback_no_chip')
+    @gateway.send(:add_creditcard, post, @credit_card, {})
+    assert_equal @credit_card.track_data, post[:card][:swipe_data]
+    assert_equal "no_chip", post[:card][:fallback_reason]
+    assert_nil post[:card][:number]
+    assert_nil post[:card][:exp_year]
+    assert_nil post[:card][:exp_month]
+    assert_nil post[:card][:cvc]
+    assert_nil post[:card][:name]
+  end
+
+  def test_add_creditcard_with_fallback_chip_error
+    post = {}
+    @credit_card.stubs(:track_data).returns("Swipe data")
+    @credit_card.stubs(:read_method).returns('fallback_chip_error')
+    @gateway.send(:add_creditcard, post, @credit_card, {})
+    assert_equal @credit_card.track_data, post[:card][:swipe_data]
+    assert_equal "chip_error", post[:card][:fallback_reason]
     assert_nil post[:card][:number]
     assert_nil post[:card][:exp_year]
     assert_nil post[:card][:exp_month]
@@ -762,6 +824,19 @@ class StripeTest < Test::Unit::TestCase
     assert_equal @emv_credit_card.icc_data, post[:card][:emv_auth_data]
   end
 
+  def test_add_creditcard_pads_eci_value
+    post = {}
+    credit_card = network_tokenization_credit_card('4242424242424242',
+      payment_cryptogram: "111111111100cryptogram",
+      verification_value: nil,
+      eci: "7"
+    )
+
+    @gateway.send(:add_creditcard, post, credit_card, {})
+
+    assert_equal "07", post[:card][:eci]
+  end
+
   def test_application_fee_is_submitted_for_purchase
     stub_comms(@gateway, :ssl_request) do
       @gateway.purchase(@amount, @credit_card, @options.merge({:application_fee => 144}))
@@ -778,11 +853,35 @@ class StripeTest < Test::Unit::TestCase
     end.respond_with(successful_capture_response)
   end
 
+  def test_exchange_rate_is_submitted_for_purchase
+    stub_comms(@gateway, :ssl_request) do
+      @gateway.purchase(@amount, @credit_card, @options.merge({:exchange_rate => 0.96251}))
+    end.check_request do |method, endpoint, data, headers|
+      assert_match(/exchange_rate=0.96251/, data)
+    end.respond_with(successful_purchase_response)
+  end
+
+  def test_exchange_rate_is_submitted_for_capture
+    stub_comms(@gateway, :ssl_request) do
+      @gateway.capture(@amount, "ch_test_charge", @options.merge({:exchange_rate => 0.96251}))
+    end.check_request do |method, endpoint, data, headers|
+      assert_match(/exchange_rate=0.96251/, data)
+    end.respond_with(successful_capture_response)
+  end
+
   def test_destination_is_submitted_for_purchase
     stub_comms(@gateway, :ssl_request) do
       @gateway.purchase(@amount, @credit_card, @options.merge({:destination => 'subaccountid'}))
     end.check_request do |method, endpoint, data, headers|
-      assert_match(/destination=subaccountid/, data)
+      assert_match(/destination\[account\]=subaccountid/, data)
+    end.respond_with(successful_purchase_response)
+  end
+
+  def test_destination_amount_is_submitted_for_purchase
+    stub_comms(@gateway, :ssl_request) do
+      @gateway.purchase(@amount, @credit_card, @options.merge({:destination => 'subaccountid', :destination_amount => @amount - 20}))
+    end.check_request do |method, endpoint, data, headers|
+      assert_match(/destination\[amount\]=#{@amount - 20}/, data)
     end.respond_with(successful_purchase_response)
   end
 
@@ -838,6 +937,7 @@ class StripeTest < Test::Unit::TestCase
       assert_match(/metadata\[i_made_up_this_key_too\]=canyoutell/, data)
       assert_match(/metadata\[email\]=foo\%40wonderfullyfakedomain\.com/, data)
       assert_match(/metadata\[order_id\]=42/, data)
+      assert_match(/metadata\[card_read_method\]=contact/, data)
     end.respond_with(successful_purchase_response)
   end
 
@@ -850,6 +950,25 @@ class StripeTest < Test::Unit::TestCase
       assert_match(/metadata\[i_made_up_this_key_too\]=canyoutell/, data)
       assert_match(/metadata\[email\]=foo\%40wonderfullyfakedomain\.com/, data)
       assert_match(/metadata\[order_id\]=42/, data)
+      assert_match(/metadata\[card_read_method\]=contact/, data)
+    end.respond_with(successful_purchase_response)
+  end
+
+  def test_quickchip_is_set_on_purchase
+    stub_comms(@gateway, :ssl_request) do
+      @emv_credit_card.read_method = 'contact_quickchip'
+      @gateway.purchase(@amount, @emv_credit_card, @options)
+    end.check_request do |method, endpoint, data, headers|
+      assert_match(/card\[processing_method\]=quick_chip/, data)
+    end.respond_with(successful_purchase_response)
+  end
+
+  def test_quickchip_is_not_set_on_authorize
+    stub_comms(@gateway, :ssl_request) do
+      @emv_credit_card.read_method = 'contact_quickchip'
+      @gateway.authorize(@amount, @emv_credit_card, @options)
+    end.check_request do |method, endpoint, data, headers|
+      refute_match(/card\[processing_method\]=quick_chip/, data)
     end.respond_with(successful_purchase_response)
   end
 
@@ -862,6 +981,32 @@ class StripeTest < Test::Unit::TestCase
     assert_equal @options[:billing_address][:address2], post[:card][:address_line2]
     assert_equal @options[:billing_address][:country], post[:card][:address_country]
     assert_equal @options[:billing_address][:city], post[:card][:address_city]
+  end
+
+  def test_add_statement_address
+    post = {}
+
+    @gateway.send(:add_statement_address, post, @options)
+
+    assert_equal @options[:statement_address][:zip], post[:statement_address][:postal_code]
+    assert_equal @options[:statement_address][:state], post[:statement_address][:state]
+    assert_equal @options[:statement_address][:address1], post[:statement_address][:line1]
+    assert_equal @options[:statement_address][:address2], post[:statement_address][:line2]
+    assert_equal @options[:statement_address][:country], post[:statement_address][:country]
+    assert_equal @options[:statement_address][:city], post[:statement_address][:city]
+  end
+
+  def test_add_statement_address_returns_nil_if_required_fields_missing
+    post = {}
+    [:address1, :city, :zip, :state].each do |required_key|
+      missing_required = @options.tap do |options|
+        options[:statement_address].delete_if { |k| k == required_key }
+      end
+
+      @gateway.send(:add_statement_address, post, missing_required)
+
+      assert_equal nil, post[:statement_address]
+    end
   end
 
   def test_ensure_does_not_respond_to_credit
@@ -895,9 +1040,31 @@ class StripeTest < Test::Unit::TestCase
       headers && headers['Idempotency-Key'] == 'test123'
     }.returns(successful_purchase_response)
 
-    @gateway.purchase(@amount, @credit_card, @options.merge(:idempotency_key => 'test123'))
+    response = @gateway.purchase(@amount, @credit_card, @options.merge(:idempotency_key => 'test123'))
+    assert_success response
   end
 
+  def test_optional_idempotency_on_void
+    @gateway.expects(:ssl_request).once.with {|method, url, post, headers|
+      headers && headers['Idempotency-Key'] == 'test123'
+    }.returns(successful_purchase_response(true))
+
+    response = @gateway.void('ch_test_charge', @options.merge(:idempotency_key => 'test123'))
+    assert_success response
+  end
+
+  def test_optional_idempotency_on_verify
+    @gateway.expects(:ssl_request).with do |method, url, post, headers|
+      headers && headers['Idempotency-Key'] == nil
+    end.returns(successful_void_response)
+
+    @gateway.expects(:ssl_request).with do |method, url, post, headers|
+      headers && headers['Idempotency-Key'] == 'test123'
+    end.returns(successful_authorization_response)
+
+    response = @gateway.verify(@credit_card, @options.merge(:idempotency_key => 'test123'))
+    assert_success response
+  end
 
   def test_initialize_gateway_with_version
     @gateway = StripeGateway.new(:login => 'login', :version => '2013-12-03')
@@ -933,9 +1100,9 @@ class StripeTest < Test::Unit::TestCase
     end.respond_with(successful_purchase_response)
   end
 
-  def test_contactless_emv_flag_is_included_with_emv_card_data
+  def test_contactless_flag_is_included_with_emv_card_data
     stub_comms(@gateway, :ssl_request) do
-      @emv_credit_card.contactless_emv = true
+      @emv_credit_card.read_method = 'contactless'
       @gateway.purchase(@amount, @emv_credit_card, @options)
     end.check_request do |method, endpoint, data, headers|
       data =~ /card\[read_method\]=contactless/
@@ -944,7 +1111,7 @@ class StripeTest < Test::Unit::TestCase
 
   def test_contactless_magstripe_flag_is_included_with_emv_card_data
     stub_comms(@gateway, :ssl_request) do
-      @emv_credit_card.contactless_magstripe = true
+      @emv_credit_card.read_method = 'contactless_magstripe'
       @gateway.purchase(@amount, @emv_credit_card, @options)
     end.check_request do |method, endpoint, data, headers|
       data =~ /card\[read_method\]=contactless_magstripe_mode/
@@ -1203,7 +1370,7 @@ class StripeTest < Test::Unit::TestCase
   # this mock is only useful with unit tests, as cryptograms generated by an EMV terminal
   # are specific to the target acquirer, so remote tests using this mock will fail elsewhere.
   def credit_card_with_icc_data
-    ActiveMerchant::Billing::CreditCard.new(icc_data: '500B56495341204352454449545F201A56495341204143515549524552205445535420434152442030315F24031512315F280208405F2A0208265F300202015F34010182025C008407A0000000031010950502000080009A031408259B02E8009C01009F02060000000734499F03060000000000009F0607A00000000310109F0902008C9F100706010A03A080009F120F4352454449544F20444520564953419F1A0208269F1C0831373030303437309F1E0831373030303437309F2608EB2EC0F472BEA0A49F2701809F3303E0B8C89F34031E03009F3501229F360200C39F37040A27296F9F4104000001319F4502DAC5DFAE5711476173FFFFFF0119D15122011758989389DFAE5A08476173FFFFFF011957114761739001010119D151220117589893895A084761739001010119')
+    ActiveMerchant::Billing::CreditCard.new(read_method: 'contact', icc_data: '500B56495341204352454449545F201A56495341204143515549524552205445535420434152442030315F24031512315F280208405F2A0208265F300202015F34010182025C008407A0000000031010950502000080009A031408259B02E8009C01009F02060000000734499F03060000000000009F0607A00000000310109F0902008C9F100706010A03A080009F120F4352454449544F20444520564953419F1A0208269F1C0831373030303437309F1E0831373030303437309F2608EB2EC0F472BEA0A49F2701809F3303E0B8C89F34031E03009F3501229F360200C39F37040A27296F9F4104000001319F4502DAC5DFAE5711476173FFFFFF0119D15122011758989389DFAE5A08476173FFFFFF011957114761739001010119D151220117589893895A084761739001010119')
   end
 
   def pre_scrubbed
@@ -1213,7 +1380,7 @@ class StripeTest < Test::Unit::TestCase
       starting SSL for api.stripe.com:443...
       SSL established
       <- "POST /v1/charges HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Basic c2tfdGVzdF9oQkwwTXF6ZGZ6Rnk3OXU0cFloUmVhQlo6\r\nUser-Agent: Stripe/v1 ActiveMerchantBindings/1.45.0\r\nX-Stripe-Client-User-Agent: {\"bindings_version\":\"1.45.0\",\"lang\":\"ruby\",\"lang_version\":\"2.1.3 p242 (2014-09-19)\",\"platform\":\"x86_64-linux\",\"publisher\":\"active_merchant\"}\r\nX-Stripe-Client-User-Metadata: {\"ip\":null}\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nConnection: close\r\nHost: api.stripe.com\r\nContent-Length: 270\r\n\r\n"
-      <- "amount=100&currency=usd&card[number]=4242424242424242&card[exp_month]=9&card[exp_year]=2015&card[cvc]=123&card[name]=Longbob+Longsen&description=ActiveMerchant+Test+Purchase&payment_user_agent=Stripe%2Fv1+ActiveMerchantBindings%2F1.45.0&metadata[email]=wow%40example.com&three_d_secure[cryptogram]=123456789abcdefghijklmnop&three_d_secure[apple_pay]=true"
+      <- "amount=100&currency=usd&card[number]=4242424242424242&card[exp_month]=9&card[exp_year]=2015&card[cvc]=123&card[name]=Longbob+Longsen&description=ActiveMerchant+Test+Purchase&payment_user_agent=Stripe%2Fv1+ActiveMerchantBindings%2F1.45.0&metadata[email]=wow%40example.com&card[cryptogram]=sensitive_data&three_d_secure[cryptogram]=123456789abcdefghijklmnop&three_d_secure[apple_pay]=true"
       -> "HTTP/1.1 200 OK\r\n"
       -> "Server: nginx\r\n"
       -> "Date: Tue, 02 Dec 2014 19:44:17 GMT\r\n"
@@ -1272,7 +1439,7 @@ class StripeTest < Test::Unit::TestCase
       starting SSL for api.stripe.com:443...
       SSL established
       <- "POST /v1/charges HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Basic c2tfdGVzdF8zT0Q0VGRLU0lPaERPTDIxNDZKSmNDNzk6\r\nUser-Agent: Stripe/v1 ActiveMerchantBindings/1.54.0\r\nStripe-Version: 2015-04-07\r\nX-Stripe-Client-User-Agent: {\"bindings_version\":\"1.54.0\",\"lang\":\"ruby\",\"lang_version\":\"2.1.1 p76 (2014-02-24)\",\"platform\":\"x86_64-darwin12.0\",\"publisher\":\"active_merchant\"}\r\nX-Stripe-Client-User-Metadata: {\"ip\":null}\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nConnection: close\r\nHost: api.stripe.com\r\nContent-Length: 713\r\n\r\n"
-      <- "card[emv_auth_data]=500B56495341204352454449545F201A56495341204143515549524552205445535420434152442030315F24031512315F280208405F2A0208265F300202015F34010182025C008407A0000000031010950502000080009A031408259B02E8009C01009F02060000000734499F03060000000000009F0607A00000000310109F0902008C9F100706010A03A080009F120F4352454449544F20444520564953419F1A0208269F1C0831373030303437309F1E0831373030303437309F2608EB2EC0F472BEA0A49F2701809F3303E0B8C89F34031E03009F3501229F360200C39F37040A27296F9F4104000001319F4502DAC5DFAE5711476173FFFFFF0119D15122011758989389DFAE5A08476173FFFFFF011957114761739001010119D151220117589893895A084761739001010119&card[encrypted_pin]=8b68af72199529b8&card[encrypted_pin_key_id]=ffff0102628d12000001"
+      <- "card[emv_auth_data]=500B56495341204352454449545F201A56495341204143515549524552205445535420434152442030315F24031512315F280208405F2A0208265F300202015F34010182025C008407A0000000031010950502000080009A031408259B02E8009C01009F02060000000734499F03060000000000009F0607A00000000310109F0902008C9F100706010A03A080009F120F4352454449544F20444520564953419F1A0208269F1C0831373030303437309F1E0831373030303437309F2608EB2EC0F472BEA0A49F2701809F3303E0B8C89F34031E03009F3501229F360200C39F37040A27296F9F4104000001319F4502DAC5DFAE5711476173FFFFFF0119D15122011758989389DFAE5A08476173FFFFFF011957114761739001010119D151220117589893895A084761739001010119&card[emv_approval_data]=garbage&card[encrypted_pin]=8b68af72199529b8&card[encrypted_pin_key_id]=ffff0102628d12000001"
       -> "HTTP/1.1 402 Payment Required\r\n"
       -> "Server: nginx\r\n"
       -> "Date: Wed, 21 Oct 2015 17:39:02 GMT\r\n"
@@ -1301,7 +1468,7 @@ class StripeTest < Test::Unit::TestCase
       starting SSL for api.stripe.com:443...
       SSL established
       <- "POST /v1/charges HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Basic [FILTERED]\r\nUser-Agent: Stripe/v1 ActiveMerchantBindings/1.54.0\r\nStripe-Version: 2015-04-07\r\nX-Stripe-Client-User-Agent: {\"bindings_version\":\"1.54.0\",\"lang\":\"ruby\",\"lang_version\":\"2.1.1 p76 (2014-02-24)\",\"platform\":\"x86_64-darwin12.0\",\"publisher\":\"active_merchant\"}\r\nX-Stripe-Client-User-Metadata: {\"ip\":null}\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nConnection: close\r\nHost: api.stripe.com\r\nContent-Length: 713\r\n\r\n"
-      <- "card[emv_auth_data]=[FILTERED]&card[encrypted_pin]=[FILTERED]&card[encrypted_pin_key_id]=[FILTERED]"
+      <- "card[emv_auth_data]=[FILTERED]&card[emv_approval_data]=[FILTERED]&card[encrypted_pin]=[FILTERED]&card[encrypted_pin_key_id]=[FILTERED]"
       -> "HTTP/1.1 402 Payment Required\r\n"
       -> "Server: nginx\r\n"
       -> "Date: Wed, 21 Oct 2015 17:39:02 GMT\r\n"
@@ -1360,7 +1527,7 @@ class StripeTest < Test::Unit::TestCase
       starting SSL for api.stripe.com:443...
       SSL established
       <- "POST /v1/charges HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Basic [FILTERED]\r\nUser-Agent: Stripe/v1 ActiveMerchantBindings/1.45.0\r\nX-Stripe-Client-User-Agent: {\"bindings_version\":\"1.45.0\",\"lang\":\"ruby\",\"lang_version\":\"2.1.3 p242 (2014-09-19)\",\"platform\":\"x86_64-linux\",\"publisher\":\"active_merchant\"}\r\nX-Stripe-Client-User-Metadata: {\"ip\":null}\r\nAccept-Encoding: gzip;q=1.0,deflate;q=0.6,identity;q=0.3\r\nAccept: */*\r\nConnection: close\r\nHost: api.stripe.com\r\nContent-Length: 270\r\n\r\n"
-      <- "amount=100&currency=usd&card[number]=[FILTERED]&card[exp_month]=9&card[exp_year]=2015&card[cvc]=[FILTERED]&card[name]=Longbob+Longsen&description=ActiveMerchant+Test+Purchase&payment_user_agent=Stripe%2Fv1+ActiveMerchantBindings%2F1.45.0&metadata[email]=wow%40example.com&three_d_secure[cryptogram]=[FILTERED]&three_d_secure[apple_pay]=true"
+      <- "amount=100&currency=usd&card[number]=[FILTERED]&card[exp_month]=9&card[exp_year]=2015&card[cvc]=[FILTERED]&card[name]=Longbob+Longsen&description=ActiveMerchant+Test+Purchase&payment_user_agent=Stripe%2Fv1+ActiveMerchantBindings%2F1.45.0&metadata[email]=wow%40example.com&card[cryptogram]=[FILTERED]&three_d_secure[cryptogram]=[FILTERED]&three_d_secure[apple_pay]=true"
       -> "HTTP/1.1 200 OK\r\n"
       -> "Server: nginx\r\n"
       -> "Date: Tue, 02 Dec 2014 19:44:17 GMT\r\n"
@@ -1808,52 +1975,55 @@ class StripeTest < Test::Unit::TestCase
     RESPONSE
   end
 
-  def successful_refunded_application_fee_response
+  def successful_partially_refunded_application_fee_response
     <<-RESPONSE
     {
-      "id": "fee_id",
-      "object": "application_fee",
-      "created": 1375375417,
-      "livemode": false,
+      "id": "fr_C8qmJKrZVMTjjF",
+      "object": "fee_refund",
       "amount": 10,
+      "balance_transaction": "txn_1BkZ4uAWOtgoysognvusG5N5",
+      "created": 1516027008,
       "currency": "usd",
-      "user": "acct_id",
-      "user_email": "acct_id",
-      "application": "ca_application",
-      "charge": "ch_test_charge",
-      "refunded": false,
-      "amount_refunded": 10
+      "fee": "fee_1BkZ4rIPBJTitsenGWcxYWCZ",
+      "metadata": {}
     }
     RESPONSE
   end
 
-  def successful_application_fee_list_response
+  def successful_fetch_application_fee_response
     <<-RESPONSE
     {
-      "object": "list",
-      "count": 2,
-      "url": "/v1/application_fees",
-      "data": [
-        {
-          "object": "application_fee",
-          "id": "application_fee_id"
-        },
-        {
-          "object": "another_fee",
-          "id": "another_fee_id"
-        }
-      ]
+      "id": "ch_1Bja3MIPBJTitsenv28Gy6iN",
+      "object": "charge",
+      "amount": 100,
+      "amount_refunded": 100,
+      "application": "ca_6E9gvTfZGEMknxpoHhC8xoeyMit55FAV",
+      "application_fee": "fee_1Bja3MIPBJTitsenKqV8Hc6R",
+      "balance_transaction": "txn_1Bja3OIPBJTitsenJ5amtW58",
+      "captured": true,
+      "created": 1515792428,
+      "currency": "usd",
+      "customer": null,
+      "description": "ActiveMerchant Test Purchase",
+      "destination": null,
+      "dispute": null,
+      "failure_code": null,
+      "failure_message": null,
+      "fraud_details": {},
+      "invoice": null,
+      "livemode": false
     }
     RESPONSE
   end
 
-  def unsuccessful_application_fee_list_response
+  def unsuccessful_fetch_application_fee_response
     <<-RESPONSE
     {
-      "object": "list",
-      "count": 0,
-      "url": "/v1/application_fees",
-      "data": []
+      "error": {
+        "type": "invalid_request_error",
+        "message": "No such charge: bad_auth",
+        "param": "id"
+      }
     }
     RESPONSE
   end
@@ -1892,6 +2062,20 @@ class StripeTest < Test::Unit::TestCase
         "type": "card_error",
         "code": "card_declined",
         "decline_code": "call_issuer",
+        "charge": "ch_test_charge"
+      }
+    }
+    RESPONSE
+  end
+
+  def declined_pickup_card_purchase_response
+    <<-RESPONSE
+    {
+      "error": {
+        "message": "Your card was declined.",
+        "type": "card_error",
+        "code": "card_declined",
+        "decline_code": "pickup_card",
         "charge": "ch_test_charge"
       }
     }

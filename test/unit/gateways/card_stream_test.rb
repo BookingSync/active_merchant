@@ -28,6 +28,18 @@ class CardStreamTest < Test::Unit::TestCase
       :description => 'AM test purchase'
     }
 
+    @visacredit_descriptor_options = {
+      :billing_address => {
+        :address1 => "Flat 6, Primrose Rise",
+        :address2 => "347 Lavender Road",
+        :city => "",
+        :state => "Northampton",
+        :zip => 'NN17 8YG '
+      },
+      :merchant_name => 'merchant',
+      :dynamic_descriptor => 'product'
+    }
+
     @declined_card = credit_card('4000300011112220',
       :month => '9',
       :year => '2014'
@@ -68,13 +80,33 @@ class CardStreamTest < Test::Unit::TestCase
     assert responseCapture.test?
   end
 
-  def test_successful_visacreditcard_refund
+  def test_successful_refund
     @gateway.expects(:ssl_post).returns(successful_refund_response)
 
     assert responseRefund = @gateway.refund(142, "authorization", @visacredit_options)
     assert_equal 'APPROVED', responseRefund.message
     assert_success responseRefund
     assert responseRefund.test?
+  end
+
+  def test_successful_refund_due_to_unsettled_payment_forces_void
+    refund = stub_comms do
+      @gateway.refund(142, 'authorization', @visacredit_options.merge(force_full_refund_if_unsettled: true))
+    end.respond_with(failed_refund_for_unsettled_payment_response, successful_void_response)
+
+    assert refund
+    assert_success refund
+    assert_equal 'APPROVED', refund.message
+    assert refund.test?
+  end
+
+  def test_failed_refund_due_to_unsettled_payment
+    @gateway.expects(:ssl_post).returns(failed_refund_for_unsettled_payment_response)
+
+    assert refund = @gateway.refund(142, "authorization", @visacredit_options)
+    assert_equal 'Can not REFUND this SALE transaction', refund.message
+    assert_failure refund
+    assert refund.test?
   end
 
   def test_successful_visacreditcard_void
@@ -93,6 +125,31 @@ class CardStreamTest < Test::Unit::TestCase
     assert_equal 'APPROVED', responseRefund.message
     assert_success responseRefund
     assert responseRefund.test?
+  end
+
+  def test_successful_visacreditcard_purchase_with_descriptors
+    stub_comms do
+      @gateway.purchase(284, @visacreditcard, @visacredit_descriptor_options)
+    end.check_request do |endpoint, data, headers|
+      assert_match(/statementNarrative1=merchant/, data)
+      assert_match(/statementNarrative2=product/, data)
+    end.respond_with(successful_purchase_response_with_descriptors)
+  end
+
+  def test_successful_visacreditcard_purchase_with_default_ip
+    stub_comms do
+      @gateway.purchase(284, @visacreditcard, @visacredit_options)
+    end.check_request do |endpoint, data, headers|
+      assert_match(/remoteAddress=1\.1\.1\.1/, data)
+    end.respond_with(successful_purchase_response_with_descriptors)
+  end
+
+  def test_successful_visacreditcard_purchase_with_default_country
+    stub_comms do
+      @gateway.purchase(284, @visacreditcard, @visacredit_options.delete(:billing_address))
+    end.check_request do |endpoint, data, headers|
+      assert_match(/customerCountryCode=GB/, data)
+    end.respond_with(successful_purchase_response)
   end
 
   def test_successful_visacreditcard_purchase_via_reference
@@ -156,6 +213,14 @@ class CardStreamTest < Test::Unit::TestCase
     end.respond_with(successful_purchase_response)
 
     assert_success purchase
+
+    purchase = stub_comms do
+      @gateway.purchase(142, @visacreditcard, @visacredit_options.merge(currency: "PEN"))
+    end.check_request do |endpoint, data, headers|
+      assert_match(/currencyCode=604/, data)
+    end.respond_with(successful_purchase_response)
+
+    assert_success purchase
   end
 
   def test_successful_purchase_without_street_address
@@ -171,7 +236,7 @@ class CardStreamTest < Test::Unit::TestCase
   end
 
   def test_hmac_signature_added_to_post
-    post_params = "action=SALE&amount=10000&cardCVV=356&cardExpiryMonth=12&cardExpiryYear=14&cardNumber=4929421234600821&countryCode=GB&currencyCode=826&customerAddress=Flat+6%2C+Primrose+Rise+347+Lavender+Road&customerName=Longbob+Longsen&customerPostCode=NN17+8YG+&merchantID=login&orderRef=AM+test+purchase&threeDSRequired=N&transactionUnique=#{@visacredit_options[:order_id]}&type=1"
+    post_params = "action=SALE&amount=10000&captureDelay=0&cardCVV=356&cardExpiryMonth=12&cardExpiryYear=14&cardNumber=4929421234600821&countryCode=GB&currencyCode=826&customerAddress=Flat+6%2C+Primrose+Rise+347+Lavender+Road&customerCountryCode=GB&customerName=Longbob+Longsen&customerPostCode=NN17+8YG+&merchantID=login&orderRef=AM+test+purchase&remoteAddress=1.1.1.1&threeDSRequired=N&transactionUnique=#{@visacredit_options[:order_id]}&type=1"
     expected_signature = Digest::SHA512.hexdigest("#{post_params}#{@gateway.options[:shared_secret]}")
 
     @gateway.expects(:ssl_post).with do |url, data|
@@ -235,6 +300,10 @@ class CardStreamTest < Test::Unit::TestCase
     "merchantID=0000000&threeDSEnabled=Y&merchantDescription=General+test+account+with+AVS%2FCV2+checking&xref=13021914NT06BM21GJ15VJH&amount=142&currencyCode=826&action=REFUND&type=1&countryCode=826&merchantAlias=0000992&remoteAddress=80.229.33.63&responseCode=0&responseMessage=REFUNDACCEPTED&customerName=Longbob+Longsen&customerAddress=Flat+6%2C+Primrose+Rise+347+Lavender+Road&customerPostCode=NN17+8YG+&transactionUnique=c7981d78d217cf3cfda6559921e31c4a&orderRef=AM+test+purchase&amountReceived=142&avscv2ResponseCode=222100&avscv2ResponseMessage=ALL+MATCH&avscv2AuthEntity=merchant+host&cv2Check=matched&addressCheck=matched&postcodeCheck=matched&threeDSXID=00000000000004717488&threeDSEnrolled=U&threeDSErrorCode=-1&threeDSErrorDescription=Error+while+attempting+to+send+the+request+to%3A+https%3A%2F%2F3dstest.universalpaymentgateway.com%3A4343%2FAPI%0A%0DPlease+make+sure+that+ActiveMerchant+server+is+running+and+the+URL+is+valid.+ERROR_INTERNET_CANNOT_CONNECT%3A+The+attempt+to+connect+to+the+server+failed.&threeDSMerchantPref=PROCEED&threeDSVETimestamp=2013-02-19+14%3A05%3A58&cardTypeCode=VC&cardNumberMask=%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A0821&threeDSRequired=N&transactionID=4717490&transactionPreviousID=4717488&timestamp=2013-02-19+14%3A06%3A21&cardType=Visa+Credit&currencyExponent=2&responseStatus=0&merchantName=CARDSTREAM+TEST&merchantID2=100001"
   end
 
+  def failed_refund_for_unsettled_payment_response
+    "responseCode=65541&responseMessage=Can+not+REFUND+this+SALE+transaction&responseStatus=2&xref=18032714RP14KM21FX11YHT&amount=142&currencyCode=826&remoteAddress=1.1.1.1&countryCode=GB&merchantID=103191&action=REFUND_SALE&requestID=5aba43ad1481e&state=finished&requestMerchantID=103191&processMerchantID=103191&transactionID=25814232&timestamp=2018-03-27+14%3A14%3A21&vcsResponseCode=0&vcsResponseMessage=Success+-+no+velocity+check+rules+applied&signature=b56640b215510a04ebfaa095b63705cda08cca318a7ccb2b2b48caec75adc187d9cae5082eb1dc71d258813ee9d879721e48af04966a489171f435bfa67b6d92"
+  end
+
   def successful_void_response
     "merchantID=103191&threeDSEnabled=Y&avscv2CheckEnabled=N&eReceiptsEnabled=N&transactionID=11132605&xref=16050316NZ51LT53FP70BMZ&state=canceled&captureDelay=-1&remoteAddress=107.15.253.186&action=CANCEL%3ASALE&type=1&currencyCode=826&countryCode=826&amount=284&orderRef=AM+test+purchase&transactionUnique=2240526ccaa7d41af63a94aab843e683&cardTypeCode=VC&cardNumberMask=492942%2A%2A%2A%2A%2A%2A0821&cardExpiryDate=1214&cardExpiryMonth=12&cardExpiryYear=14&customerName=Longbob+Longsen&customerAddress=Flat+6%2C+Primrose+Rise+347+Lavender+Road&customerPostcode=NN17+8YG&eReceiptsStoreID=1&customerReceiptsRequired=N&cv2Check=matched&addressCheck=matched&postcodeCheck=matched&avscv2ResponseCode=222100&avscv2ResponseMessage=ALL+MATCH&avscv2AuthEntity=merchant+host&addressCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&postcodeCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&threeDSRequired=N&threeDSCheckPref=authenticated&authorisationCode=084609&amountReceived=0&responseCode=0&responseMessage=Transaction+cancelled.&cardCVVMandatory=N&responseStatus=0&timestamp=2016-05-03+16%3A51%3A54&cardType=Visa+Credit&cardScheme=Visa+&cardSchemeCode=VC&cardIssuer=BARCLAYS+BANK+PLC&cardIssuerCountry=United+Kingdom&cardIssuerCountryCode=GBR&signature=73cf5ec5470f6a1b3abce4e2a4b64adc2da0cb7103e8d362b40ab101d2ff339961a593869f289f7660a286e8c92c22fd5dec4330cf7e7e0ca8651cd8c0a8d966"
   end
@@ -245,6 +314,10 @@ class CardStreamTest < Test::Unit::TestCase
 
   def successful_purchase_response_with_3dsecure
     "responseCode=65802&responseMessage=3DS+AUTHENTICATION+REQUIRED&responseStatus=2&merchantID=103191&threeDSEnabled=Y&threeDSCheckPref=not+known%2Cnot+checked%2Cauthenticated%2Cnot+authenticated%2Cattempted+authentication&avscv2CheckEnabled=N&cv2CheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&addressCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&postcodeCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&cardCVVMandatory=Y&customerID=1749&eReceiptsEnabled=N&eReceiptsStoreID=1&amount=1202&currencyCode=826&transactionUnique=42e13d06ce4d5f5e3eb4868d29baa8bb&orderRef=AM+test+purchase&threeDSRequired=Y&customerName=Longbob+Longsen&customerAddress=25+The+Larches&customerPostCode=LE10+2RT&action=SALE&type=1&countryCode=826&customerPostcode=LE10+2RT&customerReceiptsRequired=N&state=finished&remoteAddress=45.37.180.92&requestMerchantID=103191&processMerchantID=103191&xref=15080615RZ18RJ15RJ64YVZ&cardExpiryDate=1220&threeDSXID=MDAwMDAwMDAwMDAwMDg5NjY0OTc%3D&threeDSEnrolled=Y&transactionID=8966497&cardNumberMask=%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A%2A1112&cardType=Visa+Credit&cardTypeCode=VC&cardScheme=Visa+&cardSchemeCode=VC&cardIssuer=Unknown&cardIssuerCountry=Unknown&cardIssuerCountryCode=XXX&threeDSPaReq=eJxVUttuwjAM%2FZWKD2iaQrnJjVQGA7TBGFSTeMxSC8rohTRd2d8vKe0YD5F8jh37%0D%0A%2BCQQHiXidIeilMhghUXBD2jFkd%2FxPNHtCz747EaCdhhsgi1eGHyjLOIsZdR2bBdI%0D%0AC%2FVVKY48VQy4uEyWa%2BYN6LDbA9JASFAup2zk9Tx3pOkbhJQnyHa5FhGdf6wQC2UF%0D%0AQmRlqizdvc5CDeUPG7p9IC2AUp7ZUam8GBNSVZUtuIwKJZEntsgSAsQUALnr2pQm%0D%0AKnTDaxyx1TSoHs%2FBW5%2F2zlsofCCmAiKukLkO9Zyh07dob0yHYzoAUvPAE6OEzScb%0D%0Ai7q2o9U2DORmUHAD1DWZ%2FwxoqyWmot2nRYDXPEtRV%2BgLfzFEWAgWrCxlrMmbFbQG%0D%0AQwO57%2FS0MM4LpU1dxM%2FhrJx9zU8f6%2F3WuZxGL6%2Fvle%2Bbt6gLzKhYe6h3u80yAIhp%0D%0AQZpnJs1X0NHDF%2FkFvj%2B6mg%3D%3D&threeDSACSURL=https%3A%2F%2Fdropit.3dsecure.net%3A9443%2FPIT%2FACS&threeDSVETimestamp=2015-08-06+15%3A18%3A15&threeDSCheck=not+checked&vcsResponseCode=0&vcsResponseMessage=Success+-+no+velocity+check+rules+applied&currencyExponent=2&threeDSMD=UDNLRVk6eHJlZj0xNTA4MDYxNVJaMThSSjE1Uko2NFlWWg%3D%3D&timestamp=2015-08-06+15%3A18%3A17&threeDSResponseCode=65802&threeDSResponseMessage=3DS+AUTHENTICATION+REQUIRED&signature=8551e3f1c77b6cfa78e154d99ffb05fdeabbae48a7ce723a3464047731ad98a1c4bfe0b7dfdf46de7ff3dab66b3e2e365025fc9ff3a74d86ae4378c8cc985d88"
+  end
+
+  def successful_purchase_response_with_descriptors
+    "merchantID=103191&threeDSEnabled=Y&threeDSCheckPref=authenticated&avscv2CheckEnabled=N&cv2CheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&addressCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&postcodeCheckPref=not+known%2Cnot+checked%2Cmatched%2Cnot+matched%2Cpartially+matched&cardCVVMandatory=Y&customerReceiptsRequired=N&eReceiptsEnabled=N&eReceiptsStoreID=1&captureDelay=0&amount=284&currencyCode=826&statementNarrative1=merchant&statementNarrative2=product&type=1&threeDSRequired=N&customerName=Longbob+Longsen&cardExpiryMonth=12&cardExpiryYear=14&customerAddress=Flat+6%2C+Primrose+Rise+347+Lavender+Road&customerPostCode=NN17+8YG&countryCode=826&action=SALE&customerPostcode=NN17+8YG&requestID=586aae8406720&responseCode=0&responseMessage=AUTHCODE%3A684787&state=captured&requestMerchantID=103191&processMerchantID=103191&xref=17010219YV48VW21QH25TKS&paymentMethod=card&cardExpiryDate=1214&authorisationCode=684787&transactionID=13843073&responseStatus=0&timestamp=2017-01-02+19%3A48%3A21&amountReceived=284&avscv2ResponseCode=222100&avscv2ResponseMessage=ALL+MATCH&avscv2AuthEntity=merchant+host&cv2Check=matched&addressCheck=matched&postcodeCheck=matched&cardNumberMask=492942%2A%2A%2A%2A%2A%2A0821&cardType=Visa+Credit&cardTypeCode=VC&cardScheme=Visa+&cardSchemeCode=VC&cardIssuer=BARCLAYS+BANK+PLC&cardIssuerCountry=United+Kingdom&cardIssuerCountryCode=GBR&vcsResponseCode=0&vcsResponseMessage=Success+-+no+velocity+check+rules+applied&currencyExponent=2&signature=d47c9253d2d9ff6e9464a782b798b3fa699f6ed085eb03d5f87c4cf1f0994efab0c3145236df2163ea2b48fc0232bed25626b7ac331f0c98473ef4b551099eef"
   end
 
   def failed_purchase_card_declined_response
