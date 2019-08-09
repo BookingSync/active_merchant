@@ -30,6 +30,10 @@ module ActiveMerchant #:nodoc:
         commit(:post, 'payment_intents', post, options)
       end
 
+      def authorize(money, payment_method, options = {})
+        create_intent(money, payment_method, options)
+      end
+      
       def show_intent(intent_id, options)
         commit(:get, "payment_intents/#{intent_id}", nil, options)
       end
