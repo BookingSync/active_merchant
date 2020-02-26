@@ -8,12 +8,14 @@ before_install:
   - gem install bundler
 
 rvm:
+- 2.6.5
 - 2.5
 - 2.4
 - 2.3
 - 2.2
 
 gemfile:
+- Gemfile.rails60
 - Gemfile.rails52
 - Gemfile.rails51
 - Gemfile.rails50
