@@ -21,9 +21,6 @@ gemfile:
 - Gemfile.rails42
 
 matrix:
-  include:
-    - rvm: 2.1
-      gemfile: Gemfile.rails42
   exclude:
     - rvm: 2.3
       gemfile: Gemfile.rails60
