@@ -155,7 +155,7 @@ module ActiveMerchant #:nodoc:
         add_address(post, payment_source, options)
         add_customer_data(post, options)
         add_money(post, money, options)
-        commit('PAU', post)
+        commit('RES', post)
       end
 
       # Verify and transfer the specified amount.
