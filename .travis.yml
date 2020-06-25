@@ -8,21 +8,24 @@ before_install:
   - gem install bundler
 
 rvm:
+- 2.6.5
 - 2.5
 - 2.4
 - 2.3
-- 2.2
 
 gemfile:
+- Gemfile.rails60
 - Gemfile.rails52
 - Gemfile.rails51
 - Gemfile.rails50
 - Gemfile.rails42
 
 matrix:
-  include:
-    - rvm: 2.1
-      gemfile: Gemfile.rails42
+  exclude:
+    - rvm: 2.3
+      gemfile: Gemfile.rails60
+    - rvm: 2.4
+      gemfile: Gemfile.rails60
 
 notifications:
   email:
