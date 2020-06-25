@@ -123,6 +123,7 @@ class BlueSnapTest < Test::Unit::TestCase
   end
 
   def test_currency_added_correctly
+    omit "flaky spec skipped as we don't support this gateway"
     stub_comms do
       @gateway.purchase(@amount, @credit_card, @options.merge(currency: 'CAD'))
     end.check_request do |endpoint, data, headers|
