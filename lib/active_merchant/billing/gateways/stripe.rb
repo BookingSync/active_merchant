@@ -65,7 +65,8 @@ module ActiveMerchant #:nodoc:
         "JPY" => 100,
         "MXN" => 2000,
         "SGD" => 100,
-        "HKD" => 800
+        "HKD" => 800,
+        "PLN" => 200
       }
 
       def initialize(options = {})
