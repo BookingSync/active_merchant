@@ -33,7 +33,7 @@ module ActiveMerchant #:nodoc:
       def authorize(money, payment_method, options = {})
         create_intent(money, payment_method, options)
       end
-      
+
       def show_intent(intent_id, options)
         commit(:get, "payment_intents/#{intent_id}", nil, options)
       end
@@ -154,6 +154,7 @@ module ActiveMerchant #:nodoc:
 
       def setup_future_usage(post, options = {})
         post[:setup_future_usage] = options[:setup_future_usage] if %w( on_session off_session ).include?(options[:setup_future_usage])
+        post[:off_session] = options[:off_session] if options[:off_session] && options[:confirm] == true
       end
 
       def add_connected_account(post, options = {})
