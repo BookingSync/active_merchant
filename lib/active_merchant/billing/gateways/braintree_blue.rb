@@ -440,7 +440,7 @@ module ActiveMerchant #:nodoc:
       end
 
       def extract_refund_args(args)
-        options = args.extract_options!
+        options = args.last.is_a?(Hash) ? args.pop : {}
 
         # money, transaction_id, options
         if args.length == 1 # legacy signature
