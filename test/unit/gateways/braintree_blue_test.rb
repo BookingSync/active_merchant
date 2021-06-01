@@ -18,7 +18,6 @@ class BraintreeBlueTest < Test::Unit::TestCase
   end
 
   def test_refund_legacy_method_signature
-    omit "flaky spec skipped as we don't support this gateway"
     Braintree::TransactionGateway.any_instance.expects(:refund).
       with('transaction_id', nil).
       returns(braintree_result(:id => "refund_transaction_id"))
@@ -27,7 +26,6 @@ class BraintreeBlueTest < Test::Unit::TestCase
   end
 
   def test_refund_method_signature
-    omit "flaky spec skipped as we don't support this gateway"
     Braintree::TransactionGateway.any_instance.expects(:refund).
       with('transaction_id', '10.00').
       returns(braintree_result(:id => "refund_transaction_id"))
@@ -704,7 +702,6 @@ class BraintreeBlueTest < Test::Unit::TestCase
   end
 
   def test_refund_unsettled_payment
-    omit "flaky spec skipped as we don't support this gateway"
     Braintree::TransactionGateway.any_instance.
       expects(:refund).
       returns(braintree_error_result(message: "Cannot refund a transaction unless it is settled. (91506)"))
@@ -718,7 +715,6 @@ class BraintreeBlueTest < Test::Unit::TestCase
   end
 
   def test_refund_unsettled_payment_forces_void_on_full_refund
-    omit "flaky spec skipped as we don't support this gateway"
     Braintree::TransactionGateway.any_instance.
       expects(:refund).
       returns(braintree_error_result(message: "Cannot refund a transaction unless it is settled. (91506)"))
