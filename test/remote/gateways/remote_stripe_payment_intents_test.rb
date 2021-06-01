@@ -140,6 +140,17 @@ class RemoteStripeIntentsTest < Test::Unit::TestCase
     assert_equal 'on_session', response.params['setup_future_usage']
   end
 
+  def test_3ds_unauthenticated_authorize_with_off_session
+    options = {
+      currency: 'USD',
+      customer: @customer,
+      off_session: true,
+    }
+
+    assert response = @gateway.authorize(@amount, @three_ds_credit_card, options)
+    assert_failure response
+  end
+
   def test_create_payment_intent_with_shipping_address
     amount = 100
     options = {
