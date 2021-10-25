@@ -17,6 +17,7 @@ module ActiveMerchant #:nodoc:
         add_confirmation_method(post, options)
         add_customer(post, options)
         add_payment_method_token(post, payment_method, options)
+        add_payment_method_options(post, options)
         add_metadata(post, options)
         add_return_url(post, options)
         add_connected_account(post, options)
@@ -142,6 +143,13 @@ module ActiveMerchant #:nodoc:
         elsif payment_method.is_a?(String)
           post[:payment_method] = payment_method
         end
+      end
+
+      def add_payment_method_options(post, options)
+        return if options[:payment_method_options].to_h.empty?
+
+        post[:payment_method_options] = options.fetch(:payment_method_options)
+        post
       end
 
       def add_payment_method_types(post, options)
