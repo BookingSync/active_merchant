@@ -185,7 +185,7 @@ module ActiveMerchant #:nodoc:
         add_email(post, options)
         add_echo(post, options)
         add_transaction_type(post, options)
-        
+
         commit(:credit, post)
       end
 
@@ -300,7 +300,7 @@ module ActiveMerchant #:nodoc:
 
       def sign_request(params)
         params = params.sort
-        params.each { |param| param[1].gsub!(/[<>()\\]/, ' ') }
+        params.each { |param| param[1] = param[1].gsub(/[<>()\\]/, ' ') }
         values = params.map { |param| param[1].strip }
         Digest::MD5.hexdigest(values.join + @options[:cipher_key])
       end
