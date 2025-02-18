@@ -63,7 +63,8 @@ module ActiveMerchant #:nodoc:
 
       def capture(money, intent_id, options = {})
         post = {}
-        post[:amount_to_capture] = money
+        currency = options[:currency] || currency(money)
+        post[:amount_to_capture] = localized_amount(money, currency)
         add_connected_account(post, options)
         commit(:post, "payment_intents/#{intent_id}/capture", post, options)
       end
